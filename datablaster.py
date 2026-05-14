@@ -55,6 +55,7 @@ class DatasetProfile:
     path: str
     row_count: int
     columns: list[ColumnProfile]
+    validation_issues: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -62,6 +63,7 @@ class DatasetProfile:
             "row_count": self.row_count,
             "column_count": len(self.columns),
             "columns": [column.to_dict() for column in self.columns],
+            "validation_issues": self.validation_issues,
         }
 
 
@@ -117,6 +119,46 @@ def _profile_row_values(
             samples.append(text)
 
 
+def _build_missing_value_issue(column: ColumnProfile) -> dict[str, Any] | None:
+    if column.blank == 0:
+        return None
+
+    return {
+        "code": "missing_values",
+        "severity": "warning",
+        "scope": "column",
+        "column": column.name,
+        "count": column.blank,
+        "message": f"Column {column.name} has {column.blank} missing value{'s' if column.blank != 1 else ''}.",
+    }
+
+
+def _build_duplicate_row_issue(duplicate_row_count: int, path: str) -> dict[str, Any] | None:
+    if duplicate_row_count == 0:
+        return None
+
+    return {
+        "code": "duplicate_rows",
+        "severity": "warning",
+        "scope": "dataset",
+        "path": path,
+        "count": duplicate_row_count,
+        "message": f"Found {duplicate_row_count} duplicate row{'s' if duplicate_row_count != 1 else ''}.",
+    }
+
+
+def _build_type_change_issue(name: str, current_type: str, baseline_type: str) -> dict[str, Any]:
+    return {
+        "code": "type_change",
+        "severity": "warning",
+        "scope": "column",
+        "column": name,
+        "current_type": current_type,
+        "baseline_type": baseline_type,
+        "message": f"Column {name} changed from {baseline_type} to {current_type}.",
+    }
+
+
 def _is_boolean_value(value: str) -> bool:
     return value.strip().lower() in _BOOLEAN_VALUES
 
@@ -165,6 +207,23 @@ def infer_column_type(values: list[str]) -> str:
     return "text"
 
 
+def _row_signature(field_names: list[str], row: dict[str, str | None]) -> tuple[str, ...]:
+    return tuple((row.get(name) or "").strip() for name in field_names)
+
+
+def _count_duplicate_rows(rows: list[tuple[str, ...]]) -> int:
+    seen_rows: set[tuple[str, ...]] = set()
+    duplicate_row_count = 0
+
+    for signature in rows:
+        if signature in seen_rows:
+            duplicate_row_count += 1
+        else:
+            seen_rows.add(signature)
+
+    return duplicate_row_count
+
+
 def profile_csv(path: Path, *, sample_size: int = 3) -> DatasetProfile:
     with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -178,10 +237,11 @@ def profile_csv(path: Path, *, sample_size: int = 3) -> DatasetProfile:
         sample_values: dict[str, list[str]] = {name: [] for name in field_names}
         non_null_counts: dict[str, int] = {name: 0 for name in field_names}
         blank_counts: dict[str, int] = {name: 0 for name in field_names}
-
+        row_signatures: list[tuple[str, ...]] = []
         row_count = 0
         for row in reader:
             row_count += 1
+            row_signatures.append(_row_signature(field_names, row))
             _profile_row_values(
                 row,
                 field_names,
@@ -204,7 +264,15 @@ def profile_csv(path: Path, *, sample_size: int = 3) -> DatasetProfile:
         )
         for name in field_names
     ]
-    return DatasetProfile(path=str(path), row_count=row_count, columns=columns)
+    validation_issues = [
+        issue
+        for issue in (
+            *(_build_missing_value_issue(column) for column in columns),
+            _build_duplicate_row_issue(_count_duplicate_rows(row_signatures), str(path)),
+        )
+        if issue is not None
+    ]
+    return DatasetProfile(path=str(path), row_count=row_count, columns=columns, validation_issues=validation_issues)
 
 
 def profile_pandas_dataframe(dataframe: Any) -> DatasetProfile:
@@ -232,6 +300,7 @@ def compare_profiles(current: DatasetProfile, baseline: DatasetProfile) -> dict[
 
     changed_columns: list[dict[str, Any]] = []
     type_changes: list[dict[str, Any]] = []
+    validation_issues: list[dict[str, Any]] = []
     for name in sorted(current_names & baseline_names):
         current_column = current_columns[name]
         baseline_column = baseline_columns[name]
@@ -249,6 +318,9 @@ def compare_profiles(current: DatasetProfile, baseline: DatasetProfile) -> dict[
                     "current_type": current_column.inferred_type,
                     "baseline_type": baseline_column.inferred_type,
                 }
+            )
+            validation_issues.append(
+                _build_type_change_issue(name, current_column.inferred_type, baseline_column.inferred_type)
             )
 
         changed_columns.append(
@@ -278,6 +350,7 @@ def compare_profiles(current: DatasetProfile, baseline: DatasetProfile) -> dict[
         },
         "type_changes": type_changes,
         "column_changes": changed_columns,
+        "validation_issues": [*current.validation_issues, *validation_issues],
         "summary": {
             "added_column_count": len(added_columns),
             "removed_column_count": len(removed_columns),
@@ -292,11 +365,14 @@ def _profile_dataframe_like(dataframe: Any, *, path: str) -> DatasetProfile:
         raise RuntimeError("dataframe must provide columns")
 
     columns: list[ColumnProfile] = []
-    for name in list(dataframe.columns):
+    ordered_column_names = [str(name) for name in list(dataframe.columns)]
+    column_values: dict[str, list[str]] = {}
+    for name in ordered_column_names:
         series = dataframe[name]
         non_null = int(series.notna().sum())
         blank = int((series.astype(str).str.strip() == "").sum())
         observed_values = [str(value) for value in series.dropna().astype(str).tolist() if str(value).strip()]
+        column_values[name] = ["" if value is None else str(value) for value in series.tolist()]
         unique = int(len(set(observed_values)))
         samples: list[str] = []
         for value in observed_values[:3]:
@@ -314,10 +390,22 @@ def _profile_dataframe_like(dataframe: Any, *, path: str) -> DatasetProfile:
             )
         )
 
+    row_count = int(len(dataframe))
+    row_signatures = [tuple(column_values[name][index].strip() for name in ordered_column_names) for index in range(row_count)]
+    validation_issues = [
+        issue
+        for issue in (
+            *(_build_missing_value_issue(column) for column in columns),
+            _build_duplicate_row_issue(_count_duplicate_rows(row_signatures), path),
+        )
+        if issue is not None
+    ]
+
     return DatasetProfile(
         path=path,
-        row_count=int(len(dataframe)),
+        row_count=row_count,
         columns=columns,
+        validation_issues=validation_issues,
     )
 
 

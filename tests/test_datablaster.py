@@ -84,7 +84,7 @@ class ProfileCsvTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "sample.csv"
             csv_path.write_text(
-                "name,city\nAlice,NY\nAlice,\n,LA\nBob,NY\n",
+                "name,city\nAlice,NY\nAlice,NY\n,LA\nBob,NY\n",
                 encoding="utf-8",
             )
 
@@ -105,10 +105,17 @@ class ProfileCsvTests(unittest.TestCase):
 
             self.assertEqual(city_column.name, "city")
             self.assertEqual(city_column.inferred_type, "text")
-            self.assertEqual(city_column.non_null, 3)
-            self.assertEqual(city_column.blank, 1)
+            self.assertEqual(city_column.non_null, 4)
+            self.assertEqual(city_column.blank, 0)
             self.assertEqual(city_column.unique, 2)
             self.assertEqual(city_column.sample_values, ["NY", "LA"])
+
+            issue_codes = [issue["code"] for issue in profile.validation_issues]
+            self.assertIn("missing_values", issue_codes)
+            self.assertIn("duplicate_rows", issue_codes)
+
+            duplicate_issue = next(issue for issue in profile.validation_issues if issue["code"] == "duplicate_rows")
+            self.assertEqual(duplicate_issue["count"], 1)
 
     def test_infers_common_column_types(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -186,6 +193,20 @@ class CompareProfilesTests(unittest.TestCase):
             self.assertEqual(report["summary"]["type_changed_column_count"], 1)
             self.assertEqual(report["type_changes"], [{"name": "value", "current_type": "text", "baseline_type": "integer"}])
             self.assertTrue(report["column_changes"][0]["delta"]["inferred_type_changed"])
+            self.assertEqual(
+                report["validation_issues"],
+                [
+                    {
+                        "code": "type_change",
+                        "severity": "warning",
+                        "scope": "column",
+                        "column": "value",
+                        "current_type": "text",
+                        "baseline_type": "integer",
+                        "message": "Column value changed from integer to text.",
+                    }
+                ],
+            )
 
     def test_writes_comparison_report_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -212,8 +233,8 @@ class DataFrameApiTests(unittest.TestCase):
     def test_profiles_pandas_style_dataframe(self) -> None:
         frame = FakePandasFrame(
             {
-                "name": ["Alice", "Alice", None, "Bob"],
-                "city": ["NY", None, "LA", "NY"],
+                "name": ["Alice", "Alice", None, "Alice"],
+                "city": ["NY", "NY", "LA", "NY"],
             }
         )
 
@@ -222,8 +243,12 @@ class DataFrameApiTests(unittest.TestCase):
         self.assertEqual(profile.path, "<pandas-dataframe>")
         self.assertEqual(profile.row_count, 4)
         self.assertEqual(profile.columns[0].inferred_type, "text")
-        self.assertEqual(profile.columns[0].sample_values, ["Alice", "Bob"])
+        self.assertEqual(profile.columns[0].sample_values, ["Alice"])
         self.assertEqual(profile.columns[1].sample_values, ["NY", "LA"])
+        self.assertEqual(
+            [issue["code"] for issue in profile.validation_issues],
+            ["missing_values", "duplicate_rows"],
+        )
 
     def test_profiles_spark_style_dataframe_via_topandas(self) -> None:
         frame = FakeSparkFrame(
