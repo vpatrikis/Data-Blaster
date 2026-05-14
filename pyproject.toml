@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dedupe-cli"
 version = "0.1.0"
-description = "A small CLI for removing duplicate lines from text input"
+description = "A small CLI toolkit for deduping text and profiling CSV data"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 authors = [{ name = "Vassili Patrikis" }]
 license = { text = "MIT" }
 classifiers = [
@@ -19,6 +19,7 @@ classifiers = [
 
 [project.scripts]
 dedupe = "dedupe:main"
+datablaster = "datablaster:main"
 
 [tool.setuptools]
-py-modules = ["dedupe"]
+py-modules = ["dedupe", "datablaster"]
