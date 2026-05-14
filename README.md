@@ -10,6 +10,14 @@ This repo also includes a small CSV profiling entry point called `datablaster`.
 It summarizes row counts, blank values, unique values, and sample values so the
 same repo can support lightweight data inspection without starting a new project.
 
+### Data Blaster features
+
+- Profile CSV files and emit JSON summaries.
+- Profile pandas DataFrames through the same summary shape.
+- Profile Spark DataFrames through the same summary shape.
+- Compare two profiles for schema drift, type changes, row-count deltas, and changed columns.
+- Track common data quality signals such as blank values, missing values, and repeated values.
+
 ## Quick Install
 
 ```bash
@@ -69,6 +77,4 @@ python -m unittest discover -s tests
 
 ## Next useful steps
 
-- Add a pandas DataFrame helper so the same profiling logic can run on in-memory datasets.
-- Add a Spark adapter that produces the same summary for distributed datasets.
-- Expand validation to flag missing values, duplicate rows, and type changes.
+- Expand validation to flag duplicate rows and richer data quality checks.
